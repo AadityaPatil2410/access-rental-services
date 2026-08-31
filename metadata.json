@@ -1,0 +1,6 @@
+{
+  "name": "ACCESS - Occasion-Based Rental Service",
+  "description": "Access More. Own Less. Prototype rental platform validated for projector rentals for college students, clubs, and events, with roadmap categories.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
