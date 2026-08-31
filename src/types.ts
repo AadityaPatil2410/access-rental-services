@@ -28,10 +28,20 @@ export type DeliveryType = 'campus_pickup' | 'doorstep';
 
 export type DeliverySlot = 'morning' | 'afternoon' | 'evening';
 
-export type PaymentMethod = 'upi' | 'card' | 'cod';
+export type PaymentMethod = 'razorpay' | 'upi' | 'card' | 'cod';
+
+export interface UserProfile {
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+  photoURL: string | null;
+  phoneNumber?: string | null;
+}
 
 export interface Booking {
   id: string;
+  userId?: string;
+  userEmail?: string;
   productId: string;
   productName: string;
   productImage: string;
@@ -54,6 +64,8 @@ export interface Booking {
   deliverySlot: DeliverySlot;
   paymentMethod: PaymentMethod;
   paymentIdentifier?: string;
+  razorpayPaymentId?: string;
+  razorpayOrderId?: string;
   status: 'confirmed' | 'qa_passed' | 'out_for_delivery' | 'active' | 'returned';
   createdAt: string;
   qaCertificate: {

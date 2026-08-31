@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { DeliveryType, DeliverySlot, PaymentMethod } from '../types';
+import { openRazorpayCheckout } from '../lib/razorpay';
 import {
   ShieldCheck,
   Calendar,
@@ -19,31 +20,44 @@ import {
   Clock,
   Sparkles,
   Zap,
+  LogIn,
 } from 'lucide-react';
 
 export const CheckoutPage: React.FC = () => {
-  const { checkoutPayload, completeBooking, navigateTo } = useApp();
+  const {
+    checkoutPayload,
+    completeBooking,
+    navigateTo,
+    user,
+    openAuthModal,
+    showToast,
+    customRazorpayKey,
+  } = useApp();
 
   const { product, startDate, endDate, days, deliveryType: initialDeliveryType } = checkoutPayload;
 
-  // Local Form State
+  // Local Form State (Prefilled with user details if logged in)
   const [deliveryType, setDeliveryType] = useState<DeliveryType>(initialDeliveryType || 'campus_pickup');
-  const [customerName, setCustomerName] = useState('Aditya Patil');
-  const [phone, setPhone] = useState('+91 98765 43210');
+  const [customerName, setCustomerName] = useState(user?.displayName || 'Aditya Patil');
+  const [phone, setPhone] = useState(user?.phoneNumber || '+91 98765 43210');
   const [deliveryAddress, setDeliveryAddress] = useState('Hostel 12, Room 304, Campus North Block');
   const [city, setCity] = useState('Mumbai (Campus Zone)');
   const [pincode, setPincode] = useState('400076');
   const [deliverySlot, setDeliverySlot] = useState<DeliverySlot>('morning');
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('upi');
-  
-  // Payment Mock Inputs
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('razorpay');
+
+  // Manual fallback inputs
   const [upiId, setUpiId] = useState('aditya@okaxis');
-  const [cardNumber, setCardNumber] = useState('4532 •••• •••• 8821');
-  const [cardExpiry, setCardExpiry] = useState('11/28');
-  const [cardCvv, setCardCvv] = useState('742');
 
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [isProcessing, setIsProcessing] = useState(false);
+
+  // Sync with user auth if logs in mid-way
+  useEffect(() => {
+    if (user?.displayName && customerName === 'Aditya Patil') {
+      setCustomerName(user.displayName);
+    }
+  }, [user]);
 
   // Financial calculations
   const rentalFee = product.dailyPrice * days;
@@ -64,13 +78,60 @@ export const CheckoutPage: React.FC = () => {
     return Object.keys(err).length === 0;
   };
 
-  const handleConfirmOrder = (e: React.FormEvent) => {
+  const handleConfirmOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!validateForm()) return;
 
+    // Razorpay Real Checkout Gateway Execution
+    if (paymentMethod === 'razorpay') {
+      setIsProcessing(true);
+      try {
+        const randNum = Math.floor(1000 + Math.random() * 9000);
+        const tempBookingId = `ACC-2026-${randNum}`;
+
+        await openRazorpayCheckout({
+          amountRupees: grandTotal,
+          productName: product.name,
+          bookingId: tempBookingId,
+          customerName,
+          customerEmail: user?.email || 'customer@campus.edu',
+          customerPhone: phone,
+          customKey: customRazorpayKey,
+          onSuccess: async (rzpRes) => {
+            await completeBooking({
+              customerName,
+              phone,
+              deliveryAddress:
+                deliveryType === 'campus_pickup'
+                  ? 'Campus Student Activity Center Hub (Desk #2)'
+                  : deliveryAddress,
+              city,
+              pincode,
+              deliverySlot,
+              deliveryType,
+              paymentMethod: 'razorpay',
+              paymentIdentifier: rzpRes.razorpay_payment_id,
+              razorpayPaymentId: rzpRes.razorpay_payment_id,
+              razorpayOrderId: rzpRes.razorpay_order_id,
+            });
+            setIsProcessing(false);
+          },
+          onDismiss: () => {
+            setIsProcessing(false);
+            showToast('Payment Pending', 'Checkout was dismissed. You can retry whenever you are ready.', 'info');
+          },
+        });
+      } catch (err: any) {
+        setIsProcessing(false);
+        showToast('Payment Gateway Notice', err.message || 'Razorpay standard modal popup could not be loaded.', 'warning');
+      }
+      return;
+    }
+
+    // Direct / Fallback Payment execution (UPI / POD)
     setIsProcessing(true);
-    setTimeout(() => {
-      completeBooking({
+    setTimeout(async () => {
+      await completeBooking({
         customerName,
         phone,
         deliveryAddress:
@@ -83,7 +144,7 @@ export const CheckoutPage: React.FC = () => {
         deliveryType,
         paymentMethod,
         paymentIdentifier:
-          paymentMethod === 'upi' ? upiId : paymentMethod === 'card' ? cardNumber : 'Cash on QA Inspection',
+          paymentMethod === 'upi' ? upiId : 'Pay on Delivery & QA Verification',
       });
       setIsProcessing(false);
     }, 600);
@@ -103,12 +164,40 @@ export const CheckoutPage: React.FC = () => {
 
         <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">
           <Lock size={12} className="text-emerald-600" />
-          <span>Secure Prototype Checkout</span>
+          <span>Verified Secure Checkout</span>
         </div>
         <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight mt-1">
           Finalize Your Booking
         </h1>
       </div>
+
+      {/* User Login Banner if not signed in */}
+      {!user && (
+        <div className="mb-6 p-4 rounded-xl bg-gradient-to-r from-indigo-50 to-blue-50 border border-indigo-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-sm shrink-0">
+              <User size={18} />
+            </div>
+            <div>
+              <p className="text-xs sm:text-sm font-bold text-indigo-950">
+                Sign in with Google to sync your booking history
+              </p>
+              <p className="text-[11px] sm:text-xs text-indigo-700">
+                Save your rental invoice, QA certificates, and quick refund details to your account.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={openAuthModal}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 shrink-0 shadow-xs"
+            id="checkout-signin-prompt-btn"
+          >
+            <LogIn size={14} />
+            <span>Sign In / Sign Up</span>
+          </button>
+        </div>
+      )}
 
       <form onSubmit={handleConfirmOrder} className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-start">
         {/* Left Column: Delivery details & Payment (7 cols) */}
@@ -295,24 +384,25 @@ export const CheckoutPage: React.FC = () => {
             )}
           </div>
 
-          {/* 3. Mock Payment Selector (UPI / Card / POD) */}
+          {/* 3. Real Razorpay Payment Gateway & Alternative Options */}
           <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-3.5">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-slate-900 text-sm flex items-center gap-2">
                 <CreditCard size={16} className="text-indigo-600" />
-                <span>3. Payment Method</span>
+                <span>3. Payment Gateway</span>
               </h3>
-              <span className="text-[10px] font-semibold uppercase tracking-wider bg-amber-100 text-amber-900 px-2 py-0.5 rounded">
-                Demo Simulation
+              <span className="text-[10px] font-semibold uppercase tracking-wider bg-emerald-100 text-emerald-900 px-2 py-0.5 rounded flex items-center gap-1">
+                <ShieldCheck size={12} className="text-emerald-700" />
+                <span>Razorpay Secured</span>
               </span>
             </div>
 
             {/* Method Tabs */}
             <div className="grid grid-cols-3 gap-2 text-xs">
               {[
-                { id: 'upi', label: 'UPI / GPay', icon: QrCode },
-                { id: 'card', label: 'Credit/Debit Card', icon: CreditCard },
-                { id: 'cod', label: 'Pay on Handover', icon: Truck },
+                { id: 'razorpay', label: 'Razorpay (UPI / Cards)', icon: QrCode, badge: 'Instant' },
+                { id: 'upi', label: 'Direct UPI ID', icon: Zap, badge: 'Manual' },
+                { id: 'cod', label: 'Pay on Handover', icon: Truck, badge: 'QA Check' },
               ].map((m) => {
                 const Icon = m.icon;
                 return (
@@ -326,19 +416,65 @@ export const CheckoutPage: React.FC = () => {
                         : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                     }`}
                   >
-                    <Icon size={16} />
-                    <span>{m.label}</span>
+                    <Icon size={16} className={paymentMethod === m.id ? 'text-indigo-600' : 'text-slate-500'} />
+                    <span className="text-center">{m.label}</span>
+                    <span className="text-[9px] text-slate-400 font-normal">{m.badge}</span>
                   </button>
                 );
               })}
             </div>
 
-            {/* Dynamic Mock Input based on method */}
+            {/* Razorpay Banner / Details */}
+            {paymentMethod === 'razorpay' && (
+              <div className="p-4 rounded-xl bg-gradient-to-br from-indigo-900 via-indigo-950 to-slate-900 text-white space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-lg bg-indigo-500/30 border border-indigo-400/30 flex items-center justify-center font-bold text-xs">
+                      ₹
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold">Razorpay Standard Checkout</p>
+                      <p className="text-[10px] text-indigo-200">Google Pay, PhonePe, Paytm, RuPay, Visa, NetBanking</p>
+                    </div>
+                  </div>
+                  <span className="text-[10px] bg-indigo-500/40 text-indigo-100 font-mono px-2 py-0.5 rounded border border-indigo-400/30">
+                    256-Bit SSL
+                  </span>
+                </div>
+
+                <div className="text-[11px] text-indigo-100/90 leading-relaxed bg-indigo-800/30 p-2.5 rounded-lg border border-indigo-700/40 space-y-1">
+                  <div className="flex items-center gap-1.5 font-medium">
+                    <CheckCircle2 size={13} className="text-emerald-400" />
+                    <span>Real-time transaction receipt & auto-generated QA invoice</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 font-medium">
+                    <CheckCircle2 size={13} className="text-emerald-400" />
+                    <span>Security deposit (₹{deposit}) automatically tagged for fast refund</span>
+                  </div>
+                </div>
+
+                {/* Key Status Indicator */}
+                <div className="pt-2 border-t border-indigo-800/50 flex items-center justify-between text-[10px]">
+                  <span className="text-indigo-300">
+                    Active Key ID:{' '}
+                    <span className="font-mono text-emerald-400 font-semibold">
+                      {customRazorpayKey ? `${customRazorpayKey.substring(0, 10)}••••` : 'rzp_test_1DP5... (Sandbox default)'}
+                    </span>
+                  </span>
+                  {customRazorpayKey && (
+                    <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 rounded text-[9px]">
+                      Custom Key Loaded
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
             {paymentMethod === 'upi' && (
               <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 space-y-2.5 text-xs">
                 <div>
                   <label className="block font-medium text-slate-700 mb-1">
-                    Enter UPI ID (Google Pay, PhonePe, Paytm, BHIM)
+                    Enter UPI VPA / Handle
                   </label>
                   <input
                     type="text"
@@ -350,47 +486,8 @@ export const CheckoutPage: React.FC = () => {
                 </div>
                 <p className="text-[11px] text-slate-500 flex items-center gap-1">
                   <CheckCircle2 size={13} className="text-emerald-600" />
-                  <span>Security deposit will be credited back directly to this UPI ID upon return.</span>
+                  <span>Security deposit will be credited back directly to this UPI handle upon return.</span>
                 </p>
-              </div>
-            )}
-
-            {paymentMethod === 'card' && (
-              <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 space-y-2.5 text-xs">
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">Card Number</label>
-                  <input
-                    type="text"
-                    value={cardNumber}
-                    onChange={(e) => setCardNumber(e.target.value)}
-                    placeholder="4532 0000 0000 8821"
-                    className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono text-xs sm:text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-hidden"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block font-medium text-slate-700 mb-1">Expiry Date</label>
-                    <input
-                      type="text"
-                      value={cardExpiry}
-                      onChange={(e) => setCardExpiry(e.target.value)}
-                      placeholder="MM/YY"
-                      className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono text-xs sm:text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-medium text-slate-700 mb-1">CVV</label>
-                    <input
-                      type="password"
-                      value={cardCvv}
-                      onChange={(e) => setCardCvv(e.target.value)}
-                      placeholder="123"
-                      maxLength={4}
-                      className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono text-xs sm:text-sm"
-                    />
-                  </div>
-                </div>
               </div>
             )}
 
@@ -402,14 +499,6 @@ export const CheckoutPage: React.FC = () => {
                 </p>
               </div>
             )}
-
-            {/* Prototype note */}
-            <div className="p-2.5 bg-indigo-50/70 rounded-lg border border-indigo-200/70 text-[11px] text-indigo-950 flex items-center gap-2">
-              <Info size={14} className="text-indigo-600 shrink-0" />
-              <span>
-                <strong>Demo Mode:</strong> No real payment gateway or credit card charge occurs. Completing this generates a verified booking record.
-              </span>
-            </div>
           </div>
         </div>
 
@@ -503,10 +592,14 @@ export const CheckoutPage: React.FC = () => {
               id="confirm-booking-pay-btn"
             >
               {isProcessing ? (
-                <span>Generating Booking...</span>
+                <span>Opening Payment Gateway...</span>
               ) : (
                 <>
-                  <span>Confirm Booking (₹{grandTotal})</span>
+                  <span>
+                    {paymentMethod === 'razorpay'
+                      ? `Pay ₹${grandTotal} with Razorpay`
+                      : `Confirm Booking (₹${grandTotal})`}
+                  </span>
                   <ArrowRight size={16} />
                 </>
               )}

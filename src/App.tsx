@@ -9,10 +9,11 @@ import { CheckoutPage } from './pages/CheckoutPage';
 import { ConfirmationPage } from './pages/ConfirmationPage';
 import { MyBookingsPage } from './pages/MyBookingsPage';
 import { WaitlistModal } from './components/WaitlistModal';
+import { AuthModal } from './components/AuthModal';
 import { ToastContainer } from './components/ToastContainer';
 
 const MainContent: React.FC = () => {
-  const { currentPage } = useApp();
+  const { currentPage, isAuthModalOpen, closeAuthModal } = useApp();
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 selection:bg-indigo-600 selection:text-white font-sans antialiased">
@@ -34,6 +35,7 @@ const MainContent: React.FC = () => {
 
       {/* Global Modals & Notifications */}
       <WaitlistModal />
+      <AuthModal isOpen={isAuthModalOpen} onClose={closeAuthModal} />
       <ToastContainer />
     </div>
   );

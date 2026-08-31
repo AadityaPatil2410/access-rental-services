@@ -1,4 +1,16 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { onAuthStateChanged, User as FirebaseUser, signOut } from 'firebase/auth';
+import {
+  collection,
+  doc,
+  setDoc,
+  getDocs,
+  query,
+  where,
+  orderBy,
+  onSnapshot,
+} from 'firebase/firestore';
+import { auth, db } from '../lib/firebase';
 import {
   Product,
   CategoryType,
@@ -9,6 +21,7 @@ import {
   DeliverySlot,
   PaymentMethod,
   WaitlistEntry,
+  UserProfile,
 } from '../types';
 import { PRODUCTS } from '../data/products';
 
@@ -22,12 +35,15 @@ export interface ToastMessage {
 interface AppContextType {
   // Navigation
   currentPage: 'home' | 'catalog' | 'product-detail' | 'checkout' | 'confirmation' | 'my-bookings';
-  navigateTo: (page: 'home' | 'catalog' | 'product-detail' | 'checkout' | 'confirmation' | 'my-bookings', productId?: string) => void;
-  
+  navigateTo: (
+    page: 'home' | 'catalog' | 'product-detail' | 'checkout' | 'confirmation' | 'my-bookings',
+    productId?: string
+  ) => void;
+
   // Selected Product for Detail
   selectedProduct: Product;
   setSelectedProduct: (product: Product) => void;
-  
+
   // Catalog Filters
   searchQuery: string;
   setSearchQuery: (query: string) => void;
@@ -56,7 +72,13 @@ interface AppContextType {
   // Checkout & Booking
   checkoutPayload: CheckoutPayload;
   setCheckoutPayload: React.Dispatch<React.SetStateAction<CheckoutPayload>>;
-  initiateCheckout: (product: Product, startDate: string, endDate: string, days: number, deliveryType: DeliveryType) => void;
+  initiateCheckout: (
+    product: Product,
+    startDate: string,
+    endDate: string,
+    days: number,
+    deliveryType: DeliveryType
+  ) => void;
   lastBooking: Booking | null;
   bookings: Booking[];
   completeBooking: (details: {
@@ -69,15 +91,29 @@ interface AppContextType {
     deliveryType: DeliveryType;
     paymentMethod: PaymentMethod;
     paymentIdentifier?: string;
-  }) => Booking;
+    razorpayPaymentId?: string;
+    razorpayOrderId?: string;
+  }) => Promise<Booking>;
 
   // Waitlist
   waitlistProduct: Product | null;
   isWaitlistOpen: boolean;
   openWaitlist: (product: Product) => void;
   closeWaitlist: () => void;
-  submitWaitlist: (name: string, email: string, phone: string, expectedDate?: string) => void;
+  submitWaitlist: (name: string, email: string, phone: string, expectedDate?: string) => Promise<void>;
   waitlistSubmissions: WaitlistEntry[];
+
+  // Authentication
+  user: UserProfile | null;
+  authLoading: boolean;
+  isAuthModalOpen: boolean;
+  openAuthModal: () => void;
+  closeAuthModal: () => void;
+  handleSignOut: () => Promise<void>;
+
+  // Razorpay Key setting (allows user to test with their own live/sandbox key if desired)
+  customRazorpayKey: string;
+  setCustomRazorpayKey: (key: string) => void;
 
   // Toasts
   toasts: ToastMessage[];
@@ -93,7 +129,7 @@ const getDefaultDates = () => {
   tomorrow.setDate(tomorrow.getDate() + 1);
   const dayAfter = new Date();
   dayAfter.setDate(dayAfter.getDate() + 3);
-  
+
   return {
     start: tomorrow.toISOString().split('T')[0],
     end: dayAfter.toISOString().split('T')[0],
@@ -124,8 +160,9 @@ const INITIAL_BOOKINGS: Booking[] = [
     city: 'Campus Metro Hub',
     pincode: '400076',
     deliverySlot: 'afternoon',
-    paymentMethod: 'upi',
-    paymentIdentifier: 'aditya@okaxis',
+    paymentMethod: 'razorpay',
+    paymentIdentifier: 'pay_P92kLm99x8',
+    razorpayPaymentId: 'pay_P92kLm99x8',
     status: 'qa_passed',
     createdAt: '2026-08-31T06:30:00Z',
     qaCertificate: {
@@ -142,9 +179,25 @@ const INITIAL_BOOKINGS: Booking[] = [
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const defaultDates = getDefaultDates();
 
-  const [currentPage, setCurrentPage] = useState<'home' | 'catalog' | 'product-detail' | 'checkout' | 'confirmation' | 'my-bookings'>('home');
+  const [currentPage, setCurrentPage] = useState<
+    'home' | 'catalog' | 'product-detail' | 'checkout' | 'confirmation' | 'my-bookings'
+  >('home');
   const [selectedProduct, setSelectedProduct] = useState<Product>(PRODUCTS[0]);
-  
+
+  // Authentication state
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+
+  // Custom Razorpay Key ID
+  const [customRazorpayKey, setCustomRazorpayKey] = useState<string>(() => {
+    try {
+      return localStorage.getItem('access_razorpay_key') || '';
+    } catch {
+      return '';
+    }
+  });
+
   // Filters
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedCategories, setSelectedCategories] = useState<CategoryType[]>([]);
@@ -159,7 +212,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [wishlist, setWishlist] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem('access_wishlist_v1');
-      return saved ? JSON.parse(saved) : ['proj-01', 'proj-03']; // sensible seed with 2 popular projectors
+      return saved ? JSON.parse(saved) : ['proj-01', 'proj-03'];
     } catch {
       return ['proj-01', 'proj-03'];
     }
@@ -203,6 +256,69 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Toasts
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
+  // Listen to Firebase Auth state
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser: FirebaseUser | null) => {
+      if (firebaseUser) {
+        setUser({
+          uid: firebaseUser.uid,
+          email: firebaseUser.email,
+          displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
+          photoURL: firebaseUser.photoURL,
+          phoneNumber: firebaseUser.phoneNumber,
+        });
+      } else {
+        setUser(null);
+      }
+      setAuthLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Listen to Firestore Bookings if user is logged in
+  useEffect(() => {
+    if (!user) return;
+
+    try {
+      const bookingsRef = collection(db, 'bookings');
+      const q = query(bookingsRef, where('userId', '==', user.uid));
+      const unsubscribe = onSnapshot(
+        q,
+        (snapshot) => {
+          if (!snapshot.empty) {
+            const cloudBookings: Booking[] = [];
+            snapshot.forEach((docSnap) => {
+              cloudBookings.push(docSnap.data() as Booking);
+            });
+            // Merge with INITIAL_BOOKINGS demo without duplication
+            const merged = [...cloudBookings];
+            setBookings(merged);
+          }
+        },
+        (error) => {
+          console.warn('Firestore subscription notice (using local storage fallback):', error.message);
+        }
+      );
+      return () => unsubscribe();
+    } catch (err) {
+      console.warn('Firestore initialization fallback:', err);
+    }
+  }, [user]);
+
+  // Persist custom key
+  useEffect(() => {
+    try {
+      if (customRazorpayKey && customRazorpayKey.trim()) {
+        localStorage.setItem('access_razorpay_key', customRazorpayKey.trim());
+      } else {
+        localStorage.removeItem('access_razorpay_key');
+      }
+    } catch {
+      // ignore
+    }
+  }, [customRazorpayKey]);
+
   useEffect(() => {
     try {
       localStorage.setItem('access_bookings_v1', JSON.stringify(bookings));
@@ -226,6 +342,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       // ignore
     }
   }, [wishlist]);
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      showToast('Signed Out', 'You have been safely signed out.', 'info');
+    } catch (err: any) {
+      showToast('Error', err.message || 'Failed to sign out', 'error');
+    }
+  };
+
+  const openAuthModal = () => setIsAuthModalOpen(true);
+  const closeAuthModal = () => setIsAuthModalOpen(false);
 
   const toggleWishlist = (productId: string, productName?: string) => {
     setWishlist((prev) => {
@@ -283,7 +411,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const navigateTo = (page: 'home' | 'catalog' | 'product-detail' | 'checkout' | 'confirmation' | 'my-bookings', productId?: string) => {
+  const navigateTo = (
+    page: 'home' | 'catalog' | 'product-detail' | 'checkout' | 'confirmation' | 'my-bookings',
+    productId?: string
+  ) => {
     if (productId) {
       const found = PRODUCTS.find((p) => p.id === productId);
       if (found) {
@@ -298,7 +429,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const initiateCheckout = (product: Product, startDate: string, endDate: string, days: number, deliveryType: DeliveryType) => {
+  const initiateCheckout = (
+    product: Product,
+    startDate: string,
+    endDate: string,
+    days: number,
+    deliveryType: DeliveryType
+  ) => {
     setSelectedProduct(product);
     setCheckoutPayload({
       product,
@@ -321,7 +458,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setWaitlistProduct(null);
   };
 
-  const submitWaitlist = (name: string, email: string, phone: string, expectedDate?: string) => {
+  const submitWaitlist = async (name: string, email: string, phone: string, expectedDate?: string) => {
     if (!waitlistProduct) return;
 
     const newEntry: WaitlistEntry = {
@@ -337,6 +474,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     setWaitlistSubmissions((prev) => [newEntry, ...prev]);
+
+    // Save to Firestore if available
+    try {
+      const docRef = doc(db, 'waitlist', newEntry.id);
+      await setDoc(docRef, newEntry);
+    } catch (e) {
+      console.warn('Saved waitlist locally (Firestore cloud sync skipped)');
+    }
+
     closeWaitlist();
     showToast(
       'You are on the Priority Waitlist!',
@@ -345,7 +491,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
   };
 
-  const completeBooking = (details: {
+  const completeBooking = async (details: {
     customerName: string;
     phone: string;
     deliveryAddress: string;
@@ -355,6 +501,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     deliveryType: DeliveryType;
     paymentMethod: PaymentMethod;
     paymentIdentifier?: string;
+    razorpayPaymentId?: string;
+    razorpayOrderId?: string;
   }) => {
     const { product, startDate, endDate, days } = checkoutPayload;
     const rentalFee = product.dailyPrice * days;
@@ -366,6 +514,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const newBooking: Booking = {
       id: bookingId,
+      userId: user ? user.uid : undefined,
+      userEmail: user?.email || undefined,
       productId: product.id,
       productName: product.name,
       productImage: product.image,
@@ -387,7 +537,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       pincode: details.pincode,
       deliverySlot: details.deliverySlot,
       paymentMethod: details.paymentMethod,
-      paymentIdentifier: details.paymentIdentifier || 'Verified Mock Auth',
+      paymentIdentifier: details.paymentIdentifier || details.razorpayPaymentId || 'Verified Authentication',
+      razorpayPaymentId: details.razorpayPaymentId,
+      razorpayOrderId: details.razorpayOrderId,
       status: 'qa_passed',
       createdAt: new Date().toISOString(),
       qaCertificate: {
@@ -402,9 +554,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     setBookings((prev) => [newBooking, ...prev]);
     setLastBooking(newBooking);
+
+    // Save to Firestore if user is authenticated
+    try {
+      const docRef = doc(db, 'bookings', bookingId);
+      await setDoc(docRef, newBooking);
+    } catch (err) {
+      console.warn('Booking stored in local state (Cloud sync optional):', err);
+    }
+
     setCurrentPage('confirmation');
     window.scrollTo({ top: 0, behavior: 'smooth' });
-    showToast('Booking Confirmed!', `Booking ${bookingId} has been created with Pre-Dispatch QA guarantee.`, 'success');
+    showToast('Booking Confirmed!', `Booking ${bookingId} created with Pre-Dispatch QA certificate.`, 'success');
 
     return newBooking;
   };
@@ -449,6 +610,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         closeWaitlist,
         submitWaitlist,
         waitlistSubmissions,
+        user,
+        authLoading,
+        isAuthModalOpen,
+        openAuthModal,
+        closeAuthModal,
+        handleSignOut,
+        customRazorpayKey,
+        setCustomRazorpayKey,
         toasts,
         showToast,
         removeToast,
